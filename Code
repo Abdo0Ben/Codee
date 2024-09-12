@@ -1,0 +1,348 @@
+import os
+import telebot
+import requests
+import logging
+import json
+from datetime import datetime, timedelta
+from telebot import types
+
+# إعداد تكوين logging
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# توكن بوت
+bot = telebot.TeleBot('5716655872:AAFln4t399cVyw81rMPygheO85vipKmYW9c')
+
+# بيانات المستخدمين
+tokens = {}  # {user_id: token}
+start_times = {}  # {user_id: start_time}
+allowed_users = {}  # {user_id: expiration_date}
+
+# تكوينات البروكسي
+PROXY = {
+    'http': '9bkedt93m0c1vm4-country-dz:76c53yagdarivz2@172.65.64.100:6060',
+    'https': '9bkedt93m0c1vm4-country-dz:76c53yagdarivz2@172.65.64.100:6060'
+}
+
+# Admin ID
+ADMIN_ID = '5451876878'
+
+# Load users from JSON file
+def load_users():
+    global allowed_users
+    if os.path.exists('users.json'):
+        with open('users.json', 'r') as file:
+            allowed_users = json.load(file)
+
+# Save users to JSON file
+def save_users():
+    with open('users.json', 'w') as file:
+        json.dump(allowed_users, file)
+
+# Load users initially
+load_users()
+
+def save_token(user_id, token):
+    tokens[str(user_id)] = token
+    print(f"تم حفظ التوكن للمستخدم {user_id}")
+
+def delete_token(user_id):
+    if str(user_id) in tokens:
+        del tokens[str(user_id)]
+        print(f"تم حذف التوكن للمستخدم {user_id}")
+
+def get_user_token(user_id):
+    return tokens.get(str(user_id))
+
+def save_start_time(user_id, start_time):
+    start_times[str(user_id)] = start_time
+
+def can_use_start(user_id):
+    last_start_time = start_times.get(str(user_id))
+    if last_start_time:
+        last_start_time = datetime.strptime(last_start_time, '%Y-%m-%d %H:%M:%S')
+        time_diff = datetime.now() - last_start_time
+        if time_diff < timedelta(minutes=0):
+            return False, timedelta(minutes=0) - time_diff
+    return True, None
+
+def is_user_allowed(user_id):
+    user_id_str = str(user_id)
+    expiration_date_str = allowed_users.get(user_id_str)
+
+    if expiration_date_str:
+        try:
+            expiration_date = datetime.strptime(expiration_date_str, '%Y-%m-%d %H:%M:%S')
+            if datetime.now() < expiration_date:
+                return True, expiration_date
+            else:
+                delete_token(user_id)
+                del allowed_users[user_id_str]
+                save_users()
+                bot.send_message(user_id, "للأسف🥀💔لقد انتها وقت أشتراكك في البوت اذا كنت تريد الأشتراك مرة اخرة تواصل مع المطور @G_GVT 📱🎁")
+                return False, None
+        except ValueError as e:
+            logging.error(f"تنسيق تاريخ انتهاء الصلاحية غير صحيح: {expiration_date_str}")
+            return False, None
+    return False, None
+
+@bot.message_handler(commands=['admin'])
+def handle_admin(message):
+    if str(message.from_user.id) == ADMIN_ID:
+        markup = types.InlineKeyboardMarkup()
+        add_button = types.InlineKeyboardButton('إضافة مستخدم ➕', callback_data='add_user')
+        remove_button = types.InlineKeyboardButton('إزالة مستخدم ➖', callback_data='remove_user')
+        markup.add(add_button, remove_button)
+        bot.send_message(message.chat.id, "لوحة الإدارة 👮🏻‍♂️", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, "ليس لديك الصلاحية لاستخدام هذا الأمر.")
+
+@bot.callback_query_handler(func=lambda call: call.data in ['add_user', 'remove_user'])
+def handle_admin_action(call):
+    if call.data == 'add_user':
+        msg = bot.send_message(call.message.chat.id, "🚀 أدخل معرف المستخدم الذي تريد إضافته:")
+        bot.register_next_step_handler(msg, process_add_user)
+    elif call.data == 'remove_user':
+        msg = bot.send_message(call.message.chat.id, "🚀 أدخل معرف المستخدم الذي تريد إزالته:")
+        bot.register_next_step_handler(msg, process_remove_user)
+
+def process_add_user(message):
+    try:
+        user_id = message.text
+        msg = bot.send_message(message.chat.id, "⌛️ أدخل مدة الاشتراك (بالأيام):")
+        bot.register_next_step_handler(msg, lambda m: add_user_with_duration(m, user_id))
+    except Exception as e:
+        bot.send_message(message.chat.id, "حدث خطأ. يرجى المحاولة مرة أخرى.")
+
+def add_user_with_duration(message, user_id):
+    try:
+        days = int(message.text)
+        expiration_date = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        allowed_users[user_id] = expiration_date
+        save_users()
+        bot.send_message(message.chat.id, f"تمت إضافة المستخدم {user_id} بنجاح. تاريخ انتهاء الصلاحية: {expiration_date}")
+    except ValueError:
+        bot.send_message(message.chat.id, "المدة غير صحيحة. يرجى المحاولة مرة أخرى.")
+
+def process_remove_user(message):
+    try:
+        user_id = message.text
+        if user_id in allowed_users:
+            del allowed_users[user_id]
+            delete_token(user_id)
+            save_users()
+            bot.send_message(message.chat.id, f"تمت إزالة المستخدم {user_id} بنجاح.")
+        else:
+            bot.send_message(message.chat.id, "المستخدم غير موجود.")
+    except Exception as e:
+        bot.send_message(message.chat.id, "حدث خطأ. يرجى المحاولة مرة أخرى.")
+
+@bot.message_handler(content_types=['text'])
+def handle_message(message):
+    user_id = message.from_user.id
+    allowed, expiration_date = is_user_allowed(user_id)
+
+    if not allowed:
+        bot.send_message(message.chat.id, "أنت غير مسموح لك باستخدام البوت من قبل @G_GVT المطور🥱🕵🏻‍♂️.")
+        return
+
+    if message.text.startswith('/start'):
+        token = get_user_token(user_id)
+        if token:
+            can_start, time_remaining = can_use_start(user_id)
+            if can_start:
+                save_start_time(user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                apply_bonus(token, message)
+            else:
+                minutes = time_remaining.seconds // 60
+                seconds = time_remaining.seconds % 60
+                bot.send_message(message.chat.id, f'يرجى الانتظار {minutes} دقيقة و {seconds} ثانية قبل استخدام الأمر /start مرة أخرى.')
+        else:
+            first_name = message.from_user.first_name
+            last_name = message.from_user.last_name or ""
+            username = message.from_user.username or ""
+
+            markup = types.InlineKeyboardMarkup()
+            reset_button = types.InlineKeyboardButton('/reset', callback_data='reset')
+            markup.add(reset_button)
+
+            if expiration_date:
+                time_remaining = expiration_date - datetime.now()
+                days_remaining = time_remaining.days
+                hours_remaining = time_remaining.seconds // 3600
+                minutes_remaining = (time_remaining.seconds % 3600) // 60
+                time_info = (f"تاريخ انتهاء صلاحيتك: {expiration_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                             f"الوقت المتبقي: {days_remaining} يوم و {hours_remaining} ساعة و {minutes_remaining} دقيقة.")
+            else:
+                time_info = "لم يتم العثور على تاريخ انتهاء الصلاحية."
+
+            greeting = f"مرحبا 👋🏻       @{username} {time_info}              أدخل رقم هاتفك يوز فقط"
+            bot.send_message(message.chat.id, greeting, reply_markup=markup)
+            bot.register_next_step_handler(message, get_phone_number)
+    elif message.text.startswith('/reset'):
+        reset_bot(message)
+    elif message.text.startswith('/use_token'):
+        token = get_user_token(user_id)
+        if token:
+            apply_bonus(token, message)
+        else:
+            bot.send_message(message.chat.id, 'لم يتم العثور على توكن مخزن أو التوكن غير صالح.')
+    elif message.text.startswith('/balance'):
+        send_balance_info(message)
+    elif message.text.startswith('/status'):
+        if expiration_date:
+            time_remaining = expiration_date - datetime.now()
+            days_remaining = time_remaining.days
+            hours_remaining = time_remaining.seconds // 3600
+            minutes_remaining = (time_remaining.seconds % 3600) // 60
+            bot.send_message(
+                message.chat.id,
+                f"تاريخ انتهاء صلاحيتك: {expiration_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"الوقت المتبقي: {days_remaining} يوم و {hours_remaining} ساعة و {minutes_remaining} دقيقة."
+            )
+        else:
+            bot.send_message(message.chat.id, "لم يتم العثور على تاريخ انتهاء صلاحيتك.")
+    else:
+        bot.send_message(message.chat.id, 'عفوا😅 اذا كنت تريد ارسال رقم هاتفك اصغط على /start. اما اذا كنت تريد اعادة ضبط البوت وحذف اارقم اضغط على /reset')
+
+def reset_bot(message):
+    delete_token(message.from_user.id)
+    bot.send_message(message.chat.id, 'تمت إعادة ضبط البوت بنجاح أضغط على. /start. وبعدها قم بأرسال رقم الهاتف 📱.')
+
+def get_phone_number(message):
+    num = message.text
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Host': 'ibiza.ooredoo.dz',
+        'Connection': 'Keep-Alive',
+        'User-Agent': 'okhttp/4.9.3',
+    }
+
+    data = {
+        'client_id': 'ibiza-app',
+        'grant_type': 'password',
+        'mobile-number': num,
+        'language': 'AR',
+    }
+
+    try:
+        response = requests.post('https://ibiza.ooredoo.dz/auth/realms/ibiza/protocol/openid-connect/token', headers=headers, data=data, proxies=PROXY)
+        if 'ROOGY' in response.text:
+            bot.send_message(message.chat.id,'تم أرسال 💬رمز الى رقم هاتفك 📱بنجاح✅ أدخل الرمز ادناه👇🏻')
+            bot.register_next_step_handler(message, get_otp, num)
+        else:
+            bot.send_message(message.chat.id, '❌وقع خطاء الرجاء اعادة المحاولة لاحقا .')
+    except Exception as e:
+        logging.error(f"حدث خطأ في عملية OTP: {e}")
+        bot.send_message(message.chat.id, 'وقع خطاء ❌غير متوقع أثناء التحقق من الرمز اعد المحاولة من جديد 🔄')
+
+def get_otp(message, num):
+    otp = message.text
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Host': 'ibiza.ooredoo.dz',
+        'Connection': 'Keep-Alive',
+        'User-Agent': 'okhttp/4.9.3',
+    }
+
+    data = {
+        'client_id': 'ibiza-app',
+        'otp': otp,
+        'grant_type': 'password',
+        'mobile-number': num,
+        'language': 'AR',
+    }
+
+    try:
+        response = requests.post('https://ibiza.ooredoo.dz/auth/realms/ibiza/protocol/openid-connect/token', headers=headers, data=data, proxies=PROXY)
+        access_token = response.json().get('access_token')
+        if access_token:
+            save_token(message.from_user.id, access_token)
+            bot.send_message(
+                message.chat.id,
+                'تم حفظ رقم الهاتف بنجاح. يمكنك الآن استخدام الأوامر التالية:\n'
+                '/start - لبدء استخدام البوت\n'
+                '/reset - لإعادة ضبط التوكن\n'
+                '/balance - لمعرفة رصيدك الحالي\n'
+                '/status - لمعرفة تاريخ انتهاء صلاحيتك والوقت المتبقي'
+            )
+        else:
+            bot.send_message(message.chat.id, 'الرمز الذي أدخلته غير صحيح ❌')
+    except Exception as e:
+        logging.error(f"حدث خطأ في التحقق من OTP: {e}")
+        bot.send_message(message.chat.id, 'حدث خطأ غير متوقع أثناء التحقق من OTP.')
+
+def apply_bonus(access_token, message):
+    url = 'https://ibiza.ooredoo.dz/api/v1/mobile-bff/users/mgm/info/apply'
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'language': 'AR',
+        'request-id': 'ef69f4c6-2ead-4b93-95df-106ef37feefd',
+        'flavour-type': 'gms',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        "mgmValue": "ABC"  
+    }
+
+    counter = 0
+    while counter < 12:
+        response = requests.post(url, headers=headers, json=payload, proxies=PROXY)
+
+        if 'EU1002' in response.text:
+            bonus = get_bonus_details(access_token)
+            bot.send_message(message.chat.id, f'تم إرسال الأنترنت بنجاح مبروك 🎉💯\nالبونص الحالي: {bonus}')
+            balance = get_internet_balance(access_token)
+            bot.send_message(message.chat.id, f"رصيد الإنترنت الحالي:\n{balance}")
+            return True
+        else:
+            bot.send_message(message.chat.id, 'شريحتك معبئة بلكامل لديك 6G اعد المحاولة لاحقا 👌🏻🔄.')
+            return False
+
+        counter += 1
+        time.sleep(1)
+
+def get_bonus_details(access_token):
+    return "GB"
+
+def get_internet_balance(access_token):
+    url = 'https://ibiza.ooredoo.dz/api/v1/mobile-bff/users/balance'
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+        'language': 'AR'
+    }
+    try:
+        response = requests.get(url, headers=headers, proxies=PROXY)
+        if response.status_code == 200:
+            data = response.json()
+            accounts = data.get('accounts', [])
+            if accounts:
+                balance_info = []
+                for account in accounts:
+                    label = account.get('label', 'غير متوفر')
+                    value = account.get('value', 'غير متوفر')
+                    balance_info.append(f"{label}: {value}")
+                return "\n".join(balance_info)
+            else:
+                return 'لا توجد معلومات رصيد'
+        else:
+            error_message = f'حدث خطأ أثناء الحصول على الرصيد. حالة الاستجابة: {response.status_code}, نص الاستجابة: {response.text}'
+            logging.error(error_message)
+            return 'حدث خطأ أثناء الحصول على الرصيد'
+    except Exception as e:
+        logging.error(f"حدث خطأ في الحصول على الرصيد: {e}")
+        return 'حدث خطأ غير متوقع أثناء الحصول على الرصيد'
+
+def send_balance_info(message):
+    access_token = get_user_token(message.from_user.id)
+    if access_token:
+        balance = get_internet_balance(access_token)
+        bot.send_message(message.chat.id, f"رصيد الإنترنت الحالي:\n{balance}")
+    else:
+        bot.send_message(message.chat.id, 'لم يتم العثور على توكن مخزن أو التوكن غير صالح.')
+
+@bot.message_handler(func=lambda message: not is_user_allowed(message.from_user.id), content_types=['text'])
+def handle_unauthorized(message):
+    bot.send_message(message.chat.id, "ليس لديك الأذن في في تشغيل البوت راسل المطور🕵🏻‍♂️@G_GVT 🥱")
+
+bot.polling(none_stop=True)
